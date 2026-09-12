@@ -1,0 +1,3 @@
+[submodule "lyparseJSON"]
+	path = lyparseJSON
+	url = https://github.com/jhowie/lyparseJSON
