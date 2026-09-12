@@ -56,6 +56,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # include <curl/curl.h>
 
 # include "vmprod.h"
+# include "parseJSON.h"
 
 # define VMPROD_RESTAPI_GETVMS        "/api/vms"
 
@@ -149,9 +150,10 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
 {
         CURLcode                curlresult;
         HTTP_DATA               vmserver_response;
-        char                    *vmserverrestapiurl;
+        char                    *vmserverrestapiurl, *vmid;
         struct curl_slist       *headers = (struct curl_slist *) 0;
         long                    vmserver_responsecode;
+        JSON                    vmlistarray, vminfoobject, vmidstring, vmnetconfigobject;
         
         if (verbose)
                 printf ("vmprod_initialize: starting...\n");
@@ -307,7 +309,72 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
 
         // Now, we have to process the response. It should be in JSON, and
         // should be an array of objects, with each object being a virtual
-        // machine
+        // machine. We parse the JSON
+
+        set_parse_JSON_debug (verbose);
+        if ((vmlistarray = parse_JSON_from_buffer (vmserver_response.data, vmserver_response.length, false)) == (JSON) 0) {
+                // An error occurred, and we could not parse the JSON
+
+                vmprod_writeerrmsg ("Unable to parse JSON received from server (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                return false;
+        }
+
+        // Go through the objects in the array we should have received. Get the
+        // first object representing a virtual machine (assuming that there is
+        // at least one)
+
+        vminfoobject = get_first_element_in_JSON_array (vmlistarray);
+        while (vminfoobject != (JSON) 0) {
+                // Process the object. We need the "id" member value
+
+                if ((vmidstring = get_membervalue_in_JSON_object (vminfoobject, "id", true)) == (JSON) 0) {
+                        // We encountered an error, getting the value
+                        // associated with the member name "id"
+
+                        vmprod_writeerrmsg ("Unable to get value for member name \"id\" (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Process the id of the machine. We use it to get the network
+                // configuration of the virtual machine
+
+                if ((vmid = get_JSON_string (vmidstring)) == (JSON) 0) {
+                        // We could not get the string
+
+                        vmprod_writeerrmsg ("Unable to convert the id of the machine to a string (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                if (verbose)
+                        printf ("Processing virtual machine id: %s...\n", get_JSON_string (vmidstring));
+
+                // We now need to query the server for the network
+                // configuration for this virtual machine, using the id we just
+                // obtained from the list
+
+                // TODO: Query the server for the virtual machine network
+                // configuration
+ 
+                // Try and get the next object element in the array
+
+                vminfoobject = get_next_element_in_JSON_array (vmlistarray);
+        }
+
+        // We do not need the JSON any longer, so free it up
+
+        free_parsed_JSON (vmlistarray);
+
+        // Check that we did not encounter an error
+
+        if (get_last_JSON_error () != JSON_OK) {
+                // An error occurred - display the details and return as we
+                // assume we could not get a list of virtual machines
+
+                vmprod_writeerrmsg ("An error occurred processing the JSON array of virtual machines (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                return false;
+        }
 
         return true;
 }
@@ -368,7 +435,8 @@ bool vmprod_processwol (char *ethernetstr, bool verbose)
 ** This function is called by the CURL library when data is received as part of
 ** an HTTP request to a server. It can be called many times in response to a
 ** request, with chunks of data. We need to process each chunk we get. We do
-** that by adding each chunk to a response body*/
+** that by adding each chunk to a response body.
+*/
 
 size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -377,11 +445,13 @@ size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata
         unsigned char   *new_data;
 
         // Process the chunk of data we just got. We calculate the size of the
-        // chunk, and allocate more memory for it
+        // chunk, and allocate more memory for it. We add two additional bytes
+        // to the memory required, so that the JSON parser library we use can
+        // parse the JSON without copying it to a new buffer
 
         additionaldatasize = size * nmemb;
         response = (HTTP_DATA *) userdata;
-        new_data = (unsigned char *) realloc (response -> data, response -> length + additionaldatasize);
+        new_data = (unsigned char *) realloc (response -> data, response -> length + additionaldatasize +2);
         if (new_data == (unsigned char *) 0) {
                 // An error occurred, and we could not allocate memory for the
                 // additional data we got. All we can do is write out an error
