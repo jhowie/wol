@@ -158,7 +158,7 @@ const struct ether_addr *lookuphostinethersfile (const char *hostname, const cha
 		etherhostname = malloc (linelen);
 		if (! ether_line(linebuf, &hostetheraddr, etherhostname)) {
 			// We got a valid line from the ethers file, with a
-			// hostname and ether address. Check to see if we got ar
+			// hostname and ether address. Check to see if we got a
 			// match for the hostname
 
 			if (! strcmp (lookuphostname, etherhostname)) {

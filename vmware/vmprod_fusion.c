@@ -54,6 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # include <stdbool.h>
 # include <stdarg.h>
 # include <curl/curl.h>
+# include <netinet/if_ether.h>
 
 # include "vmprod.h"
 # include "parseJSON.h"
@@ -585,7 +586,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                 vminfoobject = get_next_element_in_JSON_array (vmlistarray);
         }
 
-        // We do not need the JSON any longer, so free it up
+        // Free up the JSON list of virtual machines, as we no longer need them
 
         free_parsed_JSON (vmlistarray);
 
@@ -650,16 +651,25 @@ void vmprod_writeerrmsg (char *fmt, ...)
 
 bool vmprod_processwol (char *ethernetstr, bool verbose)
 {
-        PVM_ADDR_ID     current_addr = vmaddrlist;
+        PVM_ADDR_ID             current_addr = vmaddrlist;
+        struct ether_addr       woladdr, vmaddr;
+
+        // Convert the ethernet address in the WOL packet to an ether_addr
+        // structure, so we can compare it
+
+        memcpy (&woladdr, ether_aton (ethernetstr), sizeof (struct ether_addr));
 
         // Go through the list of MAC addresses we have, looking for a match to
         // the MAC aaddress we just got
 
         while (current_addr != (PVM_ADDR_ID) 0) {
                 // Compare the ethernet MAC address in the current address with
-                // the address passed to us
+                // the address passed to us. Convert the virtual machine's
+                // ethernet address to a struct ether_addr, first
 
-                if (! strcasecmp (ethernetstr, current_addr ->macaddress)) {
+                memcpy (&vmaddr, ether_aton (current_addr ->macaddress), sizeof (struct ether_addr));
+
+                if (! memcmp (&woladdr, &vmaddr, sizeof (struct ether_addr))) {
                         // We found a matching MAC address in the list of
                         // addresses we have for virtual machines
 
