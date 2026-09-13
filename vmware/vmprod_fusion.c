@@ -455,7 +455,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
 
                         free (vmserver_response.data);
                         memset (&vmserver_response, 0, sizeof (HTTP_DATA));
-                        vmnicobject = get_next_element_in_JSON_array (vmnicsarray);
+                        vminfoobject = get_next_element_in_JSON_array (vmlistarray);
                         continue;
                         break;
 
@@ -466,6 +466,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                         vmprod_writeerrmsg ("Received bad response from server when querying for NICs (%d)\n", vmserver_responsecode);
                         free_parsed_JSON (vmlistarray);
                         return false;
+                        break;
                 }
 
                 // Parse the response, which should be an object with a member
