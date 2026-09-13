@@ -437,9 +437,29 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                         return false;
                 }
 
-                // Check what the response code was. We want 200, and nothing else
+                // Check what the response code was. We want 200, but we might
+                // get a 500 for an encrypted machine
 
-                if (vmserver_responsecode != 200) {
+                switch (vmserver_responsecode) {
+                case 200:
+                        // This is what we hoped for, just break
+
+                        break;
+
+                case 500:
+                        // The machine is encrypted, and we cannot get the NICs
+                        // so just ignore it and move to the next machine
+
+                        if (verbose)
+                                printf ("Virtual machine is encrypted, skipping it...\n");
+
+                        free (vmserver_response.data);
+                        memset (&vmserver_response, 0, sizeof (HTTP_DATA));
+                        vmnicobject = get_next_element_in_JSON_array (vmnicsarray);
+                        continue;
+                        break;
+
+                default:
                         // We did not get the code we wanted. All we can do is display
                         // an error message and return false
 
