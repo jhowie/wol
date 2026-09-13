@@ -252,7 +252,7 @@ bool wakeup_etheraddr (const char *broadcastaddr, const struct ether_addr *ether
 
 	// Send the "magic" packet
 
-	broadcastresult = sendto (udp_broadcastsocket, (const char *) magicpacket, ((16 * ETHER_ADDR_LEN) + 6), 0, (const struct sockaddr *) &broadcastaddr, sizeof (struct sockaddr));
+	broadcastresult = sendto (udp_broadcastsocket, (const char *) magicpacket, ((16 * ETHER_ADDR_LEN) + 6), 0, (const struct sockaddr *) &broadcastaddr_in, sizeof (struct sockaddr));
 
 	// Close the socket
 
