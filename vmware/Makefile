@@ -1,24 +1,34 @@
+# MacOS Makefile for wol
+#
+ARCHITECTURE = $(shell uname -m)
+CC=cc
+OBJDIR=obj/$(ARCHITECTURE)
+LIBDIR=../lyparseJSON/lib/$(ARCHITECTURE) 
+INSTALLLIBDIR=/usr/local/lib
+INSTALLINCLUDEDIR=/usr/local/include
+INSTALLBINDIR=/usr/local/bin
+LDFLAGS=-L$(LIBDIR) -lcurl -llyparseJSON
 CFLAGS=-DDEFAULTRESTSERVERURL="\"http://127.0.0.1:8697\"" -g
-LDFLAGS=-lcurl
 
-BINARIES=vmfusionwold
 
-.c.o:
-	cc -c $(CFLAGS) $<
+BINARIES=$(OBJDIR) $(OBJDIR)/vmfusionwold
+
+$(OBJDIR)/%.o : %.c
+	$(CC) $(CFLAGS) -c $< -o $(OBJDIR)/$(<:.c=.o)
 
 all: $(BINARIES)
 
 install: all
-	install -d -o root -g wheel $(BINDIR)
-	install -c -o root -g wheel -m 0555 vmfusionwold $(BINDIR)
+	install -d -o root -g wheel $(INSTALLBINDIR)
+	install -c -o root -g wheel -m 0555 $(OBJDIR)/vmfusionwold $(INSTALLBINDIR)
 
 clean:
-	rm -f $(BINARIES)
-	rm -f *.o
-	rm -f *.a
-	rm -rf *.dSYM
+	rm -rf obj
 
 install: all
 
-vmfusionwold: main.o vmprod_fusion.o
-	cc -o vmfusionwold $(CFLAGS) $(LDFLAGS) main.o vmprod_fusion.o
+$(OBJDIR)/vmfusionwold: $(OBJDIR)/main.o $(OBJDIR)/vmprod_fusion.o
+	cc -o $(OBJDIR)/vmfusionwold $(CFLAGS) $(LDFLAGS) $(OBJDIR)/main.o $(OBJDIR)/vmprod_fusion.o
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)

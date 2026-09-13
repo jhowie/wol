@@ -64,13 +64,27 @@ CURL            *vmrestserver;  // Handle to the vmrest server
 extern int      errno;
 
 /*
-** The following is a data type we use
+** The following is a data type we use when processing data received from the
+** VMware Fusion server
 */
 
 typedef struct http_data {
         unsigned char   *data;
         size_t          length;
 } HTTP_DATA, *PHTTP_DATA;
+
+/*
+** The following is a structure we use to store virtual machine MAC addresses
+** and the machine identifiers, and a pointer to the list of structures
+*/
+
+typedef struct vm_addr_id {
+        char                    *macaddress;
+        char                    *id;
+        struct vm_addr_id       *next;        
+} VM_ADDR_ID, *PVM_ADDR_ID;
+
+PVM_ADDR_ID vmaddrlist = (PVM_ADDR_ID) 0;
 
 /*
 ** The following are functions local to this module
@@ -150,10 +164,11 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
 {
         CURLcode                curlresult;
         HTTP_DATA               vmserver_response;
-        char                    *vmserverrestapiurl, *vmid;
+        char                    *vmserverrestapiurl, *vmid, *macaddress;
         struct curl_slist       *headers = (struct curl_slist *) 0;
         long                    vmserver_responsecode;
-        JSON                    vmlistarray, vminfoobject, vmidstring, vmnetconfigobject;
+        JSON                    vmlistarray, vminfoobject, vmidstring, vmnetworkobject, vmnicsarray, vmnicobject, vmmacstring;
+        PVM_ADDR_ID             newvmaddr;
         
         if (verbose)
                 printf ("vmprod_initialize: starting...\n");
@@ -275,7 +290,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         // We are now ready to make the request, to get the list of VMs!
 
         if (verbose)
-                printf ("Calling REST API to query virtual machines...\n");
+                printf ("Calling REST API to query for list of virtual machines...\n");
 
         curlresult = curl_easy_perform (vmrestserver);
         if (curlresult != CURLE_OK) {
@@ -312,12 +327,18 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         // machine. We parse the JSON
 
         set_parse_JSON_debug (verbose);
-        if ((vmlistarray = parse_JSON_from_buffer (vmserver_response.data, vmserver_response.length, false)) == (JSON) 0) {
+        if ((vmlistarray = parse_JSON_from_buffer ((char *) vmserver_response.data, vmserver_response.length, false)) == (JSON) 0) {
                 // An error occurred, and we could not parse the JSON
 
                 vmprod_writeerrmsg ("Unable to parse JSON received from server (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
                 return false;
         }
+
+        // Free up the data received from the server, as we no longer need it,
+        // and reset the data structure (we use it again, later)
+
+        free (vmserver_response.data);
+        memset (&vmserver_response, 0, sizeof (HTTP_DATA));
 
         // Go through the objects in the array we should have received. Get the
         // first object representing a virtual machine (assuming that there is
@@ -327,7 +348,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         while (vminfoobject != (JSON) 0) {
                 // Process the object. We need the "id" member value
 
-                if ((vmidstring = get_membervalue_in_JSON_object (vminfoobject, "id", true)) == (JSON) 0) {
+                if ((vmidstring = get_membervalue_in_JSON_object (vminfoobject, (unsigned char *) "id", true)) == (JSON) 0) {
                         // We encountered an error, getting the value
                         // associated with the member name "id"
 
@@ -339,7 +360,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                 // Process the id of the machine. We use it to get the network
                 // configuration of the virtual machine
 
-                if ((vmid = get_JSON_string (vmidstring)) == (JSON) 0) {
+                if ((vmid = (char *) get_JSON_string (vmidstring)) == (char *) 0) {
                         // We could not get the string
 
                         vmprod_writeerrmsg ("Unable to convert the id of the machine to a string (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
@@ -348,16 +369,198 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                 }
 
                 if (verbose)
-                        printf ("Processing virtual machine id: %s...\n", get_JSON_string (vmidstring));
+                        printf ("Processing virtual machine id: %s...\n", vmid);
 
                 // We now need to query the server for the network
                 // configuration for this virtual machine, using the id we just
                 // obtained from the list
 
-                // TODO: Query the server for the virtual machine network
-                // configuration
- 
-                // Try and get the next object element in the array
+                // Set the URL to query the REST API for the list NICs on the
+                // virtual machine. Free up the memory we allocated earlier (we
+                // could use realloc, here)
+
+                free (vmserverrestapiurl);
+                vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETVMS) + 1 + strlen (vmid) + 5);
+                if (vmserverrestapiurl == (char *) 0) {
+                        // An error occurred allocating memory
+
+                        vmprod_writeerrmsg ("Unable to allocate memory for URL to query for NICs (%s)\n", strerror (errno));
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Build the URL string to query for VMs
+
+                strcpy (vmserverrestapiurl, vmserverurl);
+                strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETVMS);
+                strcat (vmserverrestapiurl, "/");
+                strcat (vmserverrestapiurl, vmid);
+                strcat (vmserverrestapiurl, "/nic");
+
+                // Set the URL option
+
+                curlresult = curl_easy_setopt (vmrestserver, CURLOPT_URL, vmserverrestapiurl);
+                if (curlresult != CURLE_OK) {
+                        // An error occurred, and we could not set the URL for the API
+
+                        vmprod_writeerrmsg ("Unable to set URL to query NICs on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                        (void) free (vmserverrestapiurl);
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // We are now ready to make the request, to get the list of
+                // NICs on this virtual machine
+
+                if (verbose)
+                        printf ("Calling REST API to query for NICs on virtual machine...\n");
+
+                curlresult = curl_easy_perform (vmrestserver);
+                if (curlresult != CURLE_OK) {
+                        // An error occurred. All we can do is write an error message
+                        // and return
+
+                        vmprod_writeerrmsg ("Unable to execute HTTP request for NICs (%s)\n", curl_easy_strerror (curlresult));
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Get the response code from the CURL request
+
+                curlresult = curl_easy_getinfo (vmrestserver, CURLINFO_RESPONSE_CODE, &vmserver_responsecode);
+                if (curlresult != CURLE_OK) {
+                        // An error occurred, and we could not get the response code
+                        // for the request we just made
+
+                        vmprod_writeerrmsg ("Unable to get response code querying for NICs (%s)\n", curl_easy_strerror (curlresult));
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Check what the response code was. We want 200, and nothing else
+
+                if (vmserver_responsecode != 200) {
+                        // We did not get the code we wanted. All we can do is display
+                        // an error message and return false
+
+                        vmprod_writeerrmsg ("Received bad response from server when querying for NICs (%d)\n", vmserver_responsecode);
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Parse the response, which should be an object with a member
+                // that is an array of objects, one for each NIC associated
+                // with the virtual machine
+
+                if ((vmnetworkobject = parse_JSON_from_buffer ((char *) vmserver_response.data, vmserver_response.length, false)) == (JSON) 0) {
+                // An error occurred, and we could not parse the JSON
+
+                        vmprod_writeerrmsg ("Unable to parse JSON received from server (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Free up the data received from the server, as we no longer need it,
+                // and reset the data structure (we use it again, later)
+
+                free (vmserver_response.data);
+                memset (&vmserver_response, 0, sizeof (HTTP_DATA));
+
+                // Get the array of NICs in the object
+
+                if ((vmnicsarray = get_membervalue_in_JSON_object (vmnetworkobject, (unsigned char *) "nics", true)) == (JSON) 0) {
+                        // An error occured, and we could not get the array of
+                        // NICs in the virtual machine
+
+                        vmprod_writeerrmsg ("Unable to get array of NICs from network object (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                        free_parsed_JSON (vmnetworkobject);
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Get the first NIC in the array of NICs associated with the
+                // virtual machine, and then process it
+
+                vmnicobject = get_first_element_in_JSON_array (vmnicsarray);
+                while (vmnicobject != (JSON) 0) {
+                        // Get the MAC address fron this NIC object
+
+                        if ((vmmacstring = get_membervalue_in_JSON_object (vmnicobject, (unsigned char *) "macAddress", true)) == (JSON) 0) {
+                                // We could not get the MAC address from the
+                                // NIC object. All we can do is clean up and
+                                // return
+
+                                vmprod_writeerrmsg ("Unable to get MAC address from NIC object (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                                free_parsed_JSON (vmnetworkobject);
+                                free_parsed_JSON (vmlistarray);
+                                return false;
+                        }
+
+                        // Now, convert the returned JSON string into a string
+                        // we can work with
+
+                        if ((macaddress = (char *) get_JSON_string (vmmacstring)) == (char *) 0) {
+                                // An error occurred, and we could not get the
+                                // MAC address from the JSON string
+
+                                vmprod_writeerrmsg ("Unable to get MAC address as string from JSON string (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                                free_parsed_JSON (vmnetworkobject);
+                                free_parsed_JSON (vmlistarray);
+                                return false;
+                        }
+
+                        // Now, add the machine identifier and the MAC address
+                        // to the list we are building. Start by allocating
+                        // memory for the new virtual machine MAC address and
+                        // identifier we want to add
+
+                        if ((newvmaddr = malloc (sizeof (VM_ADDR_ID))) == (PVM_ADDR_ID) 0) {
+                                // An error occured, and we could not allocate
+                                // memory for the new virtual machine MAC
+                                // address
+
+                                vmprod_writeerrmsg ("Unable to allocate memory for new MAC address and machine id (%s)\n", strerror (errno));
+                                free_parsed_JSON (vmnetworkobject);
+                                free_parsed_JSON (vmlistarray);
+                                return false;
+                        }
+
+                        // Populate the members of the structure, and insert it
+                        // at the head of the list of virtual machine MAC
+                        // addresses
+
+                        if (verbose)
+                                printf ("Adding MAC Address %s for Machine ID %s to list\n", macaddress, vmid);
+
+                        newvmaddr ->id = vmid;
+                        newvmaddr -> macaddress = macaddress;
+                        newvmaddr -> next = vmaddrlist;
+                        vmaddrlist = newvmaddr;
+
+                        // Get the next NIC in the array of NICs associated
+                        // with this virtual machine
+
+                        vmnicobject = get_next_element_in_JSON_array (vmnicsarray);
+                }
+
+                // Free up the virtual machine networks object we got, as we
+                // no longer need it
+
+                free_parsed_JSON (vmnetworkobject);
+
+                // Check that we do not have an error (when getting the first
+                // or next element in the array of NICs)
+
+                if (get_last_JSON_error () != JSON_OK) {
+                        // An errror occured. We just clean up and return
+
+                        vmprod_writeerrmsg ("Unable to get first / next NIC in array of NICs (%d - %s)\n", get_last_JSON_error (), get_last_JSON_error_string ());
+                        free_parsed_JSON (vmlistarray);
+                        return false;
+                }
+
+                // Try and get the next object element in the array of virtual
+                // machines
 
                 vminfoobject = get_next_element_in_JSON_array (vmlistarray);
         }
@@ -427,6 +630,37 @@ void vmprod_writeerrmsg (char *fmt, ...)
 
 bool vmprod_processwol (char *ethernetstr, bool verbose)
 {
+        PVM_ADDR_ID     current_addr = vmaddrlist;
+
+        // Go through the list of MAC addresses we have, looking for a match to
+        // the MAC aaddress we just got
+
+        while (current_addr != (PVM_ADDR_ID) 0) {
+                // Compare the ethernet MAC address in the current address with
+                // the address passed to us
+
+                if (! strcasecmp (ethernetstr, current_addr ->macaddress)) {
+                        // We found a matching MAC address in the list of
+                        // addresses we have for virtual machines
+
+                        if (verbose)
+                                printf ("Found MAC address in list, belongs to machine %s\n", current_addr ->id);
+
+                        // TODO: Write code that tells machine to power on
+
+                        return true;
+                }
+
+                // Get the next virtual machine MAC address in the list
+
+                current_addr = current_addr ->next;
+        }
+
+        // If we got here, there was no matching MAC address
+
+        if (verbose)
+                printf ("No matching MAC address found\n");
+
         return true;
 }
 
@@ -447,7 +681,9 @@ size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata
         // Process the chunk of data we just got. We calculate the size of the
         // chunk, and allocate more memory for it. We add two additional bytes
         // to the memory required, so that the JSON parser library we use can
-        // parse the JSON without copying it to a new buffer
+        // parse the JSON without copying it to a new buffer. Note that if this
+        // callback is invoked multiple times, an extra two bytes will be added
+        // every time
 
         additionaldatasize = size * nmemb;
         response = (HTTP_DATA *) userdata;
