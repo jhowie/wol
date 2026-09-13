@@ -326,7 +326,6 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         // should be an array of objects, with each object being a virtual
         // machine. We parse the JSON
 
-        set_parse_JSON_debug (verbose);
         if ((vmlistarray = parse_JSON_from_buffer ((char *) vmserver_response.data, vmserver_response.length, false)) == (JSON) 0) {
                 // An error occurred, and we could not parse the JSON
 
