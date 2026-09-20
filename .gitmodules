@@ -1,3 +1,6 @@
 [submodule "lyparseJSON"]
 	path = lyparseJSON
 	url = https://github.com/jhowie/lyparseJSON
+[submodule "libb64"]
+	path = libb64
+	url = https://github.com/jhowie/libb64.git
