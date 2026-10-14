@@ -63,6 +63,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # define VMPROD_RESTAPI_GETPUTVMS        "/api/vms"
 
+# define MIN(_X,_Y)     (((_X) < (_Y)) ? (_X) : (_Y))
+
 CURL            *vmrestserver;  // Handle to the vmrest server
 extern int      errno;
 
@@ -71,10 +73,21 @@ extern int      errno;
 ** VMware Fusion server
 */
 
-typedef struct http_data {
+typedef struct http_get_data {
         unsigned char   *data;
         size_t          length;
-} HTTP_DATA, *PHTTP_DATA;
+} HTTP_GET_DATA, *PHTTP_DATA;
+
+/*
+** The following is a data type we use when processing data we send to the
+** VMware Fusion server
+*/
+
+typedef struct http_post_data {
+        unsigned char   *data;
+        size_t          length, sent;
+} HTTP_POST_DATA, *PHTTP_POST_DATA;
+
 
 /*
 ** The following is a structure we use to store virtual machine MAC addresses
@@ -108,6 +121,7 @@ PVM_ID_PASSWORD vmpasswordlist = (PVM_ID_PASSWORD) 0;
 */
 
 size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata);
+size_t http_read_callback (char *ptr, size_t size, size_t nmemb, void *userdata);
 static bool read_encrypted_vm_passwords (const char *vmpasswords, bool verbose);
 static const char *get_password_for_vm (const char *id);
 
@@ -399,8 +413,9 @@ bool vmprod_getcredentials (char **credentials, bool verbose)
 bool vmprod_initialize (const char *vmserverurl, const char* credentials, const char *encryptedpasswords, bool verbose)
 {
         CURLcode                curlresult;
-        HTTP_DATA               vmserver_response;
-        char                    *vmserverrestapiurl, *vmid, *macaddress, *vmpassword;
+        HTTP_GET_DATA           vmserver_response;
+        char                    *vmserverrestapiurl, *vmid, *macaddress;
+        const char              *vmpassword;
         struct curl_slist       *headers = (struct curl_slist *) 0;
         long                    vmserver_responsecode;
         JSON                    vmlistarray, vminfoobject, vmidstring, vmnetworkobject, vmnicsarray, vmnicobject, vmmacstring;
@@ -459,6 +474,20 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
                 // function
 
                 vmprod_writeerrmsg ("Unable to set callback function to process HTTP response data (%s)\n", curl_easy_strerror (curlresult));
+                return false;
+        }
+
+        // Set the callback function that is used to process data we want to
+        // send to the server. We don't use it here, in the initialization
+        // function. It is used when we send data when we are powering on a
+        // virtual machine
+
+        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_WRITEFUNCTION, http_read_callback);
+        if (curlresult != CURLE_OK) {
+                // An error occurred, and we could not set the write callback
+                // function
+
+                vmprod_writeerrmsg ("Unable to set callback function to process data sent in HTTP POST (%s)\n", curl_easy_strerror (curlresult));
                 return false;
         }
 
@@ -582,7 +611,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
         // and reset the data structure (we use it again, later)
 
         free (vmserver_response.data);
-        memset (&vmserver_response, 0, sizeof (HTTP_DATA));
+        memset (&vmserver_response, 0, sizeof (HTTP_GET_DATA));
 
         // Go through the objects in the array we should have received. Get the
         // first object representing a virtual machine (assuming that there is
@@ -660,7 +689,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
 
                         // Free the password, we no longer need it
 
-                        free (vmpassword);
+                        free ((void *) vmpassword);
                 }
 
                 // Set the URL option
@@ -717,10 +746,10 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
                         // so just ignore it and move to the next machine
 
                         if (verbose)
-                                printf ("Virtual machine is encrypted, skipping it...\n");
+                                printf ("Virtual machine is encrypted and we do not have password, skipping it...\n");
 
                         free (vmserver_response.data);
-                        memset (&vmserver_response, 0, sizeof (HTTP_DATA));
+                        memset (&vmserver_response, 0, sizeof (HTTP_GET_DATA));
                         vminfoobject = get_next_element_in_JSON_array (vmlistarray);
                         continue;
                         break;
@@ -751,7 +780,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
                 // and reset the data structure (we use it again, later)
 
                 free (vmserver_response.data);
-                memset (&vmserver_response, 0, sizeof (HTTP_DATA));
+                memset (&vmserver_response, 0, sizeof (HTTP_GET_DATA));
 
                 // Get the array of NICs in the object
 
@@ -921,7 +950,13 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
         struct ether_addr       woladdr, vmaddr;
         CURLcode                curlresult;
         char                    *vmserverrestapiurl;
+        const char              *vmpassword;
         long                    vmserver_responsecode;
+        HTTP_POST_DATA          poweroncommand = {
+                .data = (unsigned char *) "on\n",
+                .length = 3,
+                .sent = 0
+        };
 
         // Convert the ethernet address in the WOL packet to an ether_addr
         // structure, so we can compare it
@@ -957,13 +992,21 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
                                 return false;
                         }
 
-// TODO: Complete this
+                        // Build the URL we use to send a Power On command to
+                        // the virtual machine. If the virtual machine is
+                        // encrypted we need its password. Get that (if we have
+                        // it) from the list we read in earlier. The password
+                        // is Base64 encoded for us
 
-                        vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETPUTVMS) + 1 + strlen (current_addr ->id) + 7);
+                        vmpassword = get_password_for_vm (current_addr ->id);
+                        if (verbose && (vmpassword != (char *) 0))
+                                printf ("Found a password (%s) for the virtual machine...\n", vmpassword);
+
+                        vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETPUTVMS) + 1 + strlen (current_addr ->id) + 7 + ((vmpassword == (char *) 0) ? 0 : (12 + strlen (vmpassword))));
                         if (vmserverrestapiurl == (char *) 0) {
                                 // An error occurred allocating memory
 
-                                vmprod_writeerrmsg ("Unable to allocate memory for URL to query for NICs (%s)\n", strerror (errno));
+                                vmprod_writeerrmsg ("Unable to allocate memory for URL to power on virtual machine %s (%s)\n", current_addr ->id,  (errno));
                                 return false;
                         }
 
@@ -975,13 +1018,42 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
                         strcat (vmserverrestapiurl, current_addr ->id);
                         strcat (vmserverrestapiurl, "/power");
 
+                        // Check to see if we have a password for the virtual
+                        // machine 
+
+                        if (vmpassword != (char *) 0) {
+                                // We need to add the password for the virtual
+                                // machine
+
+                                strcat (vmserverrestapiurl, "?vmPassword=");
+                                strcat (vmserverrestapiurl, vmpassword);
+
+                                // Free the password, we no longer need it
+
+                                free ((void *) vmpassword);
+                        }
+
                         // Set the URL option
 
                         curlresult = curl_easy_setopt (vmrestserver, CURLOPT_URL, vmserverrestapiurl);
                         if (curlresult != CURLE_OK) {
-                                // An error occurred, and we could not set the URL for the API
+                                // An error occurred, and we could not set the
+                                // URL for the API
 
-                                vmprod_writeerrmsg ("Unable to set URL to query NICs on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                                vmprod_writeerrmsg ("Unable to set URL to power on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                                (void) free (vmserverrestapiurl);
+                                return false;
+                        }
+
+                        // Set the data we want to send to the REST API in the
+                        // POST request
+
+                        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_READDATA, &poweroncommand);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not specify
+                                // data we want to send to the API
+
+                                vmprod_writeerrmsg ("Unable to set data to send to REST API to power on virtual machine (%s)\n", curl_easy_strerror (curlresult));
                                 (void) free (vmserverrestapiurl);
                                 return false;
                         }
@@ -995,8 +1067,8 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
 
                         curlresult = curl_easy_perform (vmrestserver);
                         if (curlresult != CURLE_OK) {
-                                // An error occurred. All we can do is write an error message
-                                // and return
+                                // An error occurred. All we can do is write an
+                                // error message and return
 
                                 vmprod_writeerrmsg ("Unable to execute HTTP request to power on virtual machine (%s)\n", curl_easy_strerror (curlresult));
                                 return false;
@@ -1006,8 +1078,8 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
 
                         curlresult = curl_easy_getinfo (vmrestserver, CURLINFO_RESPONSE_CODE, &vmserver_responsecode);
                         if (curlresult != CURLE_OK) {
-                                // An error occurred, and we could not get the response code
-                                // for the request we just made
+                                // An error occurred, and we could not get the
+                                // response code for the request we just made
 
                                 vmprod_writeerrmsg ("Unable to get response code turning on virtual machine (%s)\n", curl_easy_strerror (curlresult));
                                 return false;
@@ -1052,7 +1124,7 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
 size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata)
 {
         size_t          additionaldatasize;
-        HTTP_DATA       *response;
+        HTTP_GET_DATA       *response;
         unsigned char   *new_data;
 
         // Process the chunk of data we just got. We calculate the size of the
@@ -1063,7 +1135,7 @@ size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata
         // every time
 
         additionaldatasize = size * nmemb;
-        response = (HTTP_DATA *) userdata;
+        response = (HTTP_GET_DATA *) userdata;
         new_data = (unsigned char *) realloc (response -> data, response -> length + additionaldatasize +2);
         if (new_data == (unsigned char *) 0) {
                 // An error occurred, and we could not allocate memory for the
@@ -1083,4 +1155,34 @@ size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata
         // Return the amount of data we processed
 
         return additionaldatasize;
+}
+
+/* size_t http_read_callback (char *ptr, size_t size, size_t nmemb, void *userdata)
+**
+** This function is called by the CURL library when data needs to be sent in a
+** HTTP POST request to a server. It can be called as many times as necessary,
+** to send the data in chunks
+*/
+
+size_t http_read_callback (char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+        size_t          databytestosend;
+        HTTP_POST_DATA  *postdata = (HTTP_POST_DATA *) userdata;
+
+        // Calculate the amount of data we can send in this chunk. We do that
+        // looking at how much data remains to be sent and how much data
+        // can be sent based on the size and number of members values passed
+        // to us. If there is any data to send, process it
+
+        databytestosend = MIN ((postdata -> length - postdata -> sent), (size * nmemb));
+        if (databytestosend != 0) {
+                // Copy the data that needs to be sent to the pointer provided
+                
+                memcpy (ptr, (postdata ->data + postdata ->sent), databytestosend);
+                postdata ->sent += databytestosend;
+        }
+
+        // Return the number of bytes we sent (if any)
+
+        return databytestosend;
 }
