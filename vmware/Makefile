@@ -3,12 +3,13 @@
 ARCHITECTURE = $(shell uname -m)
 CC=cc
 OBJDIR=obj/$(ARCHITECTURE)
-LIBDIR=../lyparseJSON/lib/$(ARCHITECTURE) 
+JSONLIBDIR=../lyparseJSON/lib/$(ARCHITECTURE)
+B64LIBDIR=../libb64/lib/$(ARCHITECTURE) 
 INSTALLLIBDIR=/usr/local/lib
 INSTALLINCLUDEDIR=/usr/local/include
 INSTALLBINDIR=/usr/local/bin
-LDFLAGS=-L$(LIBDIR) -lcurl -llyparseJSON
-CFLAGS=-DDEFAULTRESTSERVERURL="\"http://127.0.0.1:8697\"" -g
+LDFLAGS=-L$(JSONLIBDIR) -L$(B64LIBDIR) -lcurl -llyparseJSON -lb64
+CFLAGS=-DDEFAULTRESTSERVERURL="\"http://127.0.0.1:8697\"" -DVMENCRYPTEDPASSWORDFILE="\"/usr/local/etc/vmpasswd\""
 
 
 BINARIES=$(OBJDIR) $(OBJDIR)/vmfusionwold

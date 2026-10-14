@@ -53,13 +53,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # include <errno.h>
 # include <stdbool.h>
 # include <stdarg.h>
+# include <ctype.h>
 # include <curl/curl.h>
 # include <netinet/if_ether.h>
 
 # include "vmprod.h"
 # include "parseJSON.h"
+# include "b64.h"
 
-# define VMPROD_RESTAPI_GETVMS        "/api/vms"
+# define VMPROD_RESTAPI_GETPUTVMS        "/api/vms"
 
 CURL            *vmrestserver;  // Handle to the vmrest server
 extern int      errno;
@@ -88,10 +90,243 @@ typedef struct vm_addr_id {
 PVM_ADDR_ID vmaddrlist = (PVM_ADDR_ID) 0;
 
 /*
+** The following is a structure we use to store details of encrypted virtual
+** machines (the ID of each, and the password to use to access it), and the
+** pointer to the list
+*/
+
+typedef struct vm_id_password {
+        char                    *id;
+        char                    *password;
+        struct vm_id_password   *next;
+} VM_ID_PASSWORD, *PVM_ID_PASSWORD;
+
+PVM_ID_PASSWORD vmpasswordlist = (PVM_ID_PASSWORD) 0;
+
+/*
 ** The following are functions local to this module
 */
 
 size_t http_write_callback (char *ptr, size_t size, size_t nmemb, void *userdata);
+static bool read_encrypted_vm_passwords (const char *vmpasswords, bool verbose);
+static const char *get_password_for_vm (const char *id);
+
+/* static bool read_encrypted_vm_passwords (const char *vmpasswords, bool verbose)
+**
+** This function is called to read the machine identifiers and passwords of
+** encrypted machines, from the file specified as the first argument
+*/
+
+static bool read_encrypted_vm_passwords (const char *vmpasswords, bool verbose)
+{
+        FILE            *passwordsfp;
+        char            *linein;
+        int             linenum = 0, linereadlength;
+        size_t          linebufflength;
+        PVM_ID_PASSWORD newidpassword;
+
+        // Open the file
+
+        if ((passwordsfp = fopen (vmpasswords, "r")) == (FILE *) 0) {
+                // We cannot read the file, so just return. This is a soft
+                // error, and we do not fail if it cannot be opened
+
+                if (verbose)
+                        printf ("Unable to open file of vm passwords at %s\n", vmpasswords);
+
+                return true;
+        }
+
+        // Go through the lines in the file, reading each
+
+        linenum = 0;
+        linein = (char *) 0;
+        linebufflength = 0;
+        while (getline (&linein, &linebufflength, passwordsfp) != -1) {   
+                // Increment the line number
+
+                linenum ++;
+
+                // Check to see what the first character of the line in is. If
+                // it is a '#', a newline, or a space we ignore it
+
+                if ((linein [0] == '#') || (linein [0] == '\n') || isspace (linein [0])) {
+                        // We can skip this line
+
+                        continue;
+                }
+
+                // Strip the newline from the end of the string (if it exists)
+
+                linereadlength = strlen (linein);
+                if (linein [linereadlength -1] == '\n')
+                        linein [linereadlength -1] = (char) 0;
+
+                // Create a new id and password structure to hold details of
+                // this virtual machine
+
+                if ((newidpassword = malloc (sizeof (VM_ID_PASSWORD))) == (PVM_ID_PASSWORD) 0) {
+                        // An error occurred, and we could not allocate memory
+                        // to store the ID and password of this virtual machine
+
+                        vmprod_writeerrmsg ("Unable to allocate memory for id and password for vm (%s)\n", strerror (errno));
+                        free (linein);
+                        return false;
+                }
+
+                // Populate the members of the newly allocated structure. We
+                // start with the id. 
+
+                newidpassword ->password = newidpassword ->id = strdup (linein);
+                if (newidpassword -> id == (char *) 0) {
+                        // We were unable to allocate memory for the line just read
+
+
+                        vmprod_writeerrmsg ("Unable to allocate memory for line just read in (%s)\n", strerror (errno));
+                        free (linein);
+                        return false;
+                }
+
+                // We read each character of the ID up-to a space character or
+                // the terminating NULL
+
+                while ((! isspace (*newidpassword ->password)) && (*newidpassword ->password != (char) 0))
+                        newidpassword ->password ++;
+
+                // Check that the character at the end of the machine id field
+                // is not the NULL terminator
+
+                if (*newidpassword ->password == (char) 0) {
+                        // This is a malformed line, as there is no password
+
+                        vmprod_writeerrmsg ("Malformed line (%d) in vmpassword file (%s)\n", linenum, linein);
+                        free (newidpassword -> id);
+                        continue;
+                }
+                
+                // Now, process the password, looking for the first non-space
+                // character. We terminate the ID by writing a NULL character
+                // and start at the next character
+
+                *newidpassword ->password ++ = (char) 0;
+                while (isspace (*newidpassword ->password))
+                        newidpassword ->password ++;
+
+                // Check that we have not found a NULL, as that means that the
+                // password is missing
+
+                if (*newidpassword ->password == (char) 0) {
+                        // This is a malformed line, as there is no password
+
+                        vmprod_writeerrmsg ("Malformed line (%d) in vmpassword file (%s)\n", linenum, linein);
+                        free (newidpassword -> id);
+                        continue;
+                }
+
+                // Now, make the next pointer be the head of the existing list
+                // of ids and passwords, and then make the head of the list be
+                // this new entry
+
+                newidpassword ->next = vmpasswordlist;
+                vmpasswordlist = newidpassword;
+
+                if (verbose)
+                        printf ("Added ID: %s Password: %s to internal list of vm passwords\n", newidpassword ->id, newidpassword ->password);
+        }
+
+        // Close the file, as we no longer need it, free up the last read
+        // line in, and return true
+
+        fclose (passwordsfp);
+        free (linein);
+        return true;
+}
+
+/* static const char *get_password_for_vm (const char *id)
+**
+** This function is called to get the password for an encrypted virtual
+** machine, from the list read in from the vmpasswords file. It will convert
+** it to Base64, and it will replace padding characters ('=') with %3D
+*/
+
+static const char *get_password_for_vm (const char *id)
+{
+        PVM_ID_PASSWORD currentpassword = vmpasswordlist;
+        char            *b64password;
+        int             b64passwordlen;
+
+        // Go through the list of passwords looking for a matching identifier
+        // for a virtual machine
+
+        while (currentpassword != (PVM_ID_PASSWORD) 0) {
+                // Check if the identifier of the virtual mnachine in the list
+                // matches the one passed to us
+
+                if (! strcmp (id, currentpassword ->id)) {
+                        // We found a matching virtual machine identifier, so
+                        // convert it to Base 64
+
+                        if ((b64password = asctob64 (currentpassword -> password, true)) == (char *) 0) {
+                                // An error occurred, and we could not convert
+                                // the password to Base64
+
+                                vmprod_writeerrmsg ("Unable to convert the password for vmid %s to Base64", id);
+                                return (char *) 0;
+                        }
+
+                        // We need to check for trailing padding characters
+                        // ('='), and replace them with %3D
+
+                        b64passwordlen = strlen (b64password);
+                        if (b64password [b64passwordlen -2] == '=') {
+                                // The last two characters are padding
+                                // characters, and need to be replaced
+
+                                if ((b64password = realloc (b64password, (b64passwordlen +6))) == (char *) 0) {
+                                        // An error occurred, and we could not
+                                        // reallocate memory to replace the
+                                        // padding characters
+
+                                        vmprod_writeerrmsg ("Unable to reallocate memory for two padding characters in Base64 password for vm %d\n", id);
+                                        return (char *) 0;
+                                }
+
+                                // Replace the two padding characters with %3D%3D
+
+                                strcat ((b64password + (b64passwordlen -2)) , "%3D%3D");
+                        }
+                        else if (b64password [b64passwordlen -1] == '=') {
+                                // The last character is a padding character
+                                // and needs to be replaced
+
+                               if ((b64password = realloc (b64password, (b64passwordlen +3))) == (char *) 0) {
+                                        // An error occurred, and we could not
+                                        // reallocate memory to replace the
+                                        // padding characters
+
+                                        vmprod_writeerrmsg ("Unable to reallocate memory for one padding characters in Base64 password for vm %d\n", id);
+                                        return (char *) 0;
+                                }
+
+                                // Replace the padding character with %3D
+                                
+                                strcat ((b64password + (b64passwordlen -1)) , "%3D");
+                        }
+
+                        // Return the Base64 encoded password
+
+                        return b64password;
+                }
+
+                // Get the next password in the list
+
+                currentpassword = currentpassword ->next;
+        }
+
+        // We never found a matching machine identifier, so just return NULL
+
+        return (char *) 0;
+}
 
 /* bool vmprod_getcredentials (char **credentials, bool verbose)
 **
@@ -161,11 +396,11 @@ bool vmprod_getcredentials (char **credentials, bool verbose)
 ** belongs to in a list, which is consulted when we receive a magic packet
 */
 
-bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool verbose)
+bool vmprod_initialize (const char *vmserverurl, const char* credentials, const char *encryptedpasswords, bool verbose)
 {
         CURLcode                curlresult;
         HTTP_DATA               vmserver_response;
-        char                    *vmserverrestapiurl, *vmid, *macaddress;
+        char                    *vmserverrestapiurl, *vmid, *macaddress, *vmpassword;
         struct curl_slist       *headers = (struct curl_slist *) 0;
         long                    vmserver_responsecode;
         JSON                    vmlistarray, vminfoobject, vmidstring, vmnetworkobject, vmnicsarray, vmnicobject, vmmacstring;
@@ -173,6 +408,15 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         
         if (verbose)
                 printf ("vmprod_initialize: starting...\n");
+
+        // Read the file of encrypted vm passwords, and load it into memory
+
+        if (! read_encrypted_vm_passwords (encryptedpasswords, verbose)) {
+                // An error occuured, and we could not load the encrypted
+                // virtual passwords into memory. We display an error message
+
+                vmprod_writeerrmsg ("Encrypted virtual machines will be ignored!\n");
+        }
 
         // Set up CURL to connect to the server
 
@@ -233,7 +477,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         // Set the URL to query the REST API for the list of virtual machines,
         // starting with allocating memory for the URL
 
-        vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETVMS) + 1);
+        vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETPUTVMS) + 1);
         if (vmserverrestapiurl == (char *) 0) {
                 // An error occurred allocating memory
 
@@ -244,7 +488,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
         // Build the URL string to query for VMs
 
         strcpy (vmserverrestapiurl, vmserverurl);
-        strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETVMS);
+        strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETPUTVMS);
 
         // Set the URL option
 
@@ -373,14 +617,24 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
 
                 // We now need to query the server for the network
                 // configuration for this virtual machine, using the id we just
-                // obtained from the list
+                // obtained from the list. If the virtual machine is encrypted
+                // we need its password. Get that (if we have it) from the list
+                // we read in earlier. The password is Base64 encoded for us
+
+                vmpassword = get_password_for_vm (vmid);
+                if (verbose && (vmpassword != (char *) 0))
+                        printf ("Found a password (%s) for the virtual machine...\n", vmpassword);
 
                 // Set the URL to query the REST API for the list NICs on the
                 // virtual machine. Free up the memory we allocated earlier (we
                 // could use realloc, here)
 
                 free (vmserverrestapiurl);
-                vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETVMS) + 1 + strlen (vmid) + 5);
+
+                // Allocate memory for the URL. It is variable as it can
+                // include the password for the virtual machine (if we have one)
+
+                vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETPUTVMS) + 1 + strlen (vmid) + 5 + ((vmpassword == (char *) 0) ? 0 : (12 + strlen (vmpassword))));
                 if (vmserverrestapiurl == (char *) 0) {
                         // An error occurred allocating memory
 
@@ -392,10 +646,22 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool v
                 // Build the URL string to query for VMs
 
                 strcpy (vmserverrestapiurl, vmserverurl);
-                strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETVMS);
+                strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETPUTVMS);
                 strcat (vmserverrestapiurl, "/");
                 strcat (vmserverrestapiurl, vmid);
                 strcat (vmserverrestapiurl, "/nic");
+                
+                // Check to see if we have a password for the virtual machine 
+                if (vmpassword != (char *) 0) {
+                        // We need to add the password for the Virtual Machine
+
+                        strcat (vmserverrestapiurl, "?vmPassword=");
+                        strcat (vmserverrestapiurl, vmpassword);
+
+                        // Free the password, we no longer need it
+
+                        free (vmpassword);
+                }
 
                 // Set the URL option
 
@@ -641,7 +907,7 @@ void vmprod_writeerrmsg (char *fmt, ...)
         va_end (ap);
 }
 
-/* bool vmprod_processwol (char *ethernetstr, bool verbose)
+/* bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool verbose)
 **
 ** This function is called to process a received Wake On LAN (WOL) "magic"
 ** packet by the listener. It check the Ethernet address passed as a string
@@ -649,10 +915,13 @@ void vmprod_writeerrmsg (char *fmt, ...)
 ** sends a start command to Fusion for the associated virtual machine
 */
 
-bool vmprod_processwol (char *ethernetstr, bool verbose)
+bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool verbose)
 {
         PVM_ADDR_ID             current_addr = vmaddrlist;
         struct ether_addr       woladdr, vmaddr;
+        CURLcode                curlresult;
+        char                    *vmserverrestapiurl;
+        long                    vmserver_responsecode;
 
         // Convert the ethernet address in the WOL packet to an ether_addr
         // structure, so we can compare it
@@ -676,7 +945,85 @@ bool vmprod_processwol (char *ethernetstr, bool verbose)
                         if (verbose)
                                 printf ("Found MAC address in list, belongs to machine %s\n", current_addr ->id);
 
-                        // TODO: Write code that tells machine to power on
+                        // Tell the curl library that we want to upload (which
+                        // is a PUT operation)
+
+                        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_UPLOAD, 1);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not set the
+                                // HTTP UPLOAD (PUT) option
+
+                                vmprod_writeerrmsg ("Unable to set HTTP UPLOAD (PUT) option (%s)\n", curl_easy_strerror (curlresult));
+                                return false;
+                        }
+
+// TODO: Complete this
+
+                        vmserverrestapiurl = (char *) malloc (strlen (vmserverurl) + strlen (VMPROD_RESTAPI_GETPUTVMS) + 1 + strlen (current_addr ->id) + 7);
+                        if (vmserverrestapiurl == (char *) 0) {
+                                // An error occurred allocating memory
+
+                                vmprod_writeerrmsg ("Unable to allocate memory for URL to query for NICs (%s)\n", strerror (errno));
+                                return false;
+                        }
+
+                        // Build the URL string to query for VMs
+
+                        strcpy (vmserverrestapiurl, vmserverurl);
+                        strcat (vmserverrestapiurl, VMPROD_RESTAPI_GETPUTVMS);
+                        strcat (vmserverrestapiurl, "/");
+                        strcat (vmserverrestapiurl, current_addr ->id);
+                        strcat (vmserverrestapiurl, "/power");
+
+                        // Set the URL option
+
+                        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_URL, vmserverrestapiurl);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not set the URL for the API
+
+                                vmprod_writeerrmsg ("Unable to set URL to query NICs on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                                (void) free (vmserverrestapiurl);
+                                return false;
+                        }
+
+                        // We are now ready to make the request, to send a
+                        // request to power the machine on (this will also move
+                        // a machine from a suspended state to running)
+
+                        if (verbose)
+                                printf ("Calling REST API to power on virtual machine...\n");
+
+                        curlresult = curl_easy_perform (vmrestserver);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred. All we can do is write an error message
+                                // and return
+
+                                vmprod_writeerrmsg ("Unable to execute HTTP request to power on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                                return false;
+                        }
+
+                        // Get the response code from the CURL request
+
+                        curlresult = curl_easy_getinfo (vmrestserver, CURLINFO_RESPONSE_CODE, &vmserver_responsecode);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not get the response code
+                                // for the request we just made
+
+                                vmprod_writeerrmsg ("Unable to get response code turning on virtual machine (%s)\n", curl_easy_strerror (curlresult));
+                                return false;
+                        }
+
+                        if (vmserver_responsecode != 200) {
+                                // We did not get the response code we wanted
+
+                                vmprod_writeerrmsg ("Unable to turn on virtual machine (HTTP Response Code was %d)\n", vmserver_responsecode);
+                                return false;
+                        }
+
+                        if (verbose)
+                                printf ("Virtual machine turned on!\n");
+
+                        // We are done! Just return
 
                         return true;
                 }

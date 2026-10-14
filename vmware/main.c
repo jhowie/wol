@@ -65,7 +65,7 @@ int             main (int argc, char *argv []);
 static void     DisplayHelp (void);
 static bool	getudpport (const char *port, unsigned short *udpport);
 void            vmwold_cleanup (void);
-static void     vmwold_listener (unsigned short udpport, bool verbose);
+static void     vmwold_listener (const char *vmserverurl, unsigned short udpport, bool verbose);
 void            vmwold_signalhandler (int signal);
 
 // Global variables used in this module
@@ -78,8 +78,7 @@ int main (int argc, char *argv [])
 {
         int             c, i;
         unsigned short	udpport = htons (UDPBROADCAST_PORT);
-        char            *vmserverurl = DEFAULTRESTSERVERURL;
-        char            *credentials = (char *) 0;
+        char            *vmserverurl = DEFAULTRESTSERVERURL, *vmpasswords = VMENCRYPTEDPASSWORDFILE, *credentials = (char *) 0;
 	int	        retval;
 
         // Process the command line, looking for options
@@ -94,6 +93,26 @@ int main (int argc, char *argv [])
                         // with no transformation
 
                         credentials = optarg;
+                        break;
+
+                case 'f':
+                        // The user has provided a filename containing the list
+                        // of IDs of encrypted machines, and the password to
+                        // use for each
+
+                        vmpasswords = optarg;
+
+                        // Check that the file exists, and that the process can
+                        // read it. Note that we do not check that the default
+                        // file can be read!
+
+                        if (! access (vmpasswords, R_OK)) {
+                                // Either the file does not exist, or we cannot
+                                // read it
+
+                                fprintf (stderr, "The file of vm passwords at %s does not exist, or cannot be read\n", vmpasswords);
+                                return (EXIT_FAILURE);
+                        }
                         break;
 
 		case 'h':
@@ -178,7 +197,7 @@ int main (int argc, char *argv [])
         // Now we need to initialize ourselves for the vmware product we are
         // using, to enumerate virtual machines and get their MAC addresses
 
-        if (! vmprod_initialize (vmserverurl, credentials, verbose)) {
+        if (! vmprod_initialize (vmserverurl, credentials, vmpasswords, verbose)) {
                 // An error occurred, and we were unable to initialize vmware
 
                 exit (EXIT_FAILURE);
@@ -202,7 +221,7 @@ int main (int argc, char *argv [])
         // Now, we just call the worker function that listens for WOL "magic"
         // packets, and processes them
 
-        vmwold_listener (udpport, verbose);
+        vmwold_listener (vmserverurl, udpport, verbose);
         
 	// We should never, ever get here
 
@@ -225,9 +244,11 @@ static void DisplayHelp (void)
         printf ("and sending a start command using the same REST API.\n");
 	printf ("\n");
         printf ("\t-c <creds>   Authentication credentials (see Product Specific Help)\n");
+        printf ("\t-f <file>    The file of IDs of encrypted machine and their passwords\n");
         printf ("\t-h           Displays this help text\n");
 	printf ("\t-p <port>    The name of a UDP service or a number between 0 and 65,535\n");
 	printf ("\t-u <URL>     The URL of the vmware REST server\n");
+        printf ("\t-v           Turn on verbose debugging\n");
 	printf ("\n");
 	printf ("Credentials must be specified in a format compatible with the destination vmware\n");
 	printf ("product. If credentials are not specified, you will be prompted for them. If\n");
@@ -316,7 +337,7 @@ void vmwold_cleanup (void)
         (void) close (wol_listen_socket);       // Should really check return!
 }
 
-/* static void vmwold_listener (unsigned short udpport)
+/* static void vmwold_listener (const char *vmserverurl, unsigned short udpport)
 **
 ** This function is the main worker of the program. It listens continuously for
 ** broadcast UDP packets, and if they contain a WOL "magic" packet, extracts
@@ -325,7 +346,7 @@ void vmwold_cleanup (void)
 ** start command if one matches
 */
 
-static void vmwold_listener (unsigned short udpport, bool verbose)
+static void vmwold_listener (const char *vmserverurl, unsigned short udpport, bool verbose)
 {
         struct sockaddr_in      listeningaddress;
         unsigned char           databuffer [2048], ethernetaddr [ETHER_ADDR_LEN], magichdr [6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -441,7 +462,7 @@ static void vmwold_listener (unsigned short udpport, bool verbose)
                 if (verbose)
                         printf ("Received magic packet for %s\n", ethernetstr);
 
-                (void) vmprod_processwol (ethernetstr, verbose);
+                (void) vmprod_processwol (vmserverurl, ethernetstr, verbose);
         }
 
         exit (EXIT_SUCCESS);

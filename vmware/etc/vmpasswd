@@ -1,0 +1,16 @@
+#
+# vmpasswd
+#
+# This file contains the list of VM IDs of encrypted virtual machines and the
+# passwords for each.
+#
+# The file contains lines, with each line representing a VM. The format of the
+# line is Machine ID followed by whitespace character(s) (spaces and/or tabs)
+# and the password for the virtual machine, e.g.:
+#
+#       01234ABCDE      secretpass
+#
+# Lines with a '#' are comment lines and are ignored. Empty lines (lines that
+# are simply newlines) are also ignored
+#
+#

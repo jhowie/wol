@@ -48,8 +48,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # define __VMPROD_H__
 
 bool vmprod_getcredentials (char **credentials, bool verbose);
-bool vmprod_initialize (const char *vmserverurl, const char* credentials, bool verbose);
-bool vmprod_processwol (char *ethernetstr, bool verbose);
+bool vmprod_initialize (const char *vmserverurl, const char* credentials, const char *vmpasswords, bool verbose);
+bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool verbose);
 void vmprod_DisplayHelp (void);
 void vmprod_writeerrmsg (char *fmt, ...);
 
