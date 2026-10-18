@@ -307,6 +307,7 @@ static const char *get_password_for_vm (const char *id)
 
                                 // Replace the two padding characters with %3D%3D
 
+                                b64password [b64passwordlen -2] = (char) 0;
                                 strcat ((b64password + (b64passwordlen -2)) , "%3D%3D");
                         }
                         else if (b64password [b64passwordlen -1] == '=') {
@@ -324,6 +325,7 @@ static const char *get_password_for_vm (const char *id)
 
                                 // Replace the padding character with %3D
                                 
+                                b64password [b64passwordlen -1] = (char) 0;
                                 strcat ((b64password + (b64passwordlen -1)) , "%3D");
                         }
 
@@ -482,7 +484,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
         // function. It is used when we send data when we are powering on a
         // virtual machine
 
-        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_WRITEFUNCTION, http_read_callback);
+        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_READFUNCTION, http_read_callback);
         if (curlresult != CURLE_OK) {
                 // An error occurred, and we could not set the write callback
                 // function
@@ -530,13 +532,21 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
                 return false;
         }
 
-        // Set the header we need
+        // Set the headers we need, both Content-Type and Accept
+
+        if ((headers = curl_slist_append (headers, "Content-Type: application/vnd.vmware.vmw.rest-v1+json")) == (struct curl_slist *) 0) {
+                // An error occurred, all we can do is write out an error
+                // message and return
+
+                vmprod_writeerrmsg ("Unable to add Content-Type to header list (%s)\n", curl_easy_strerror (curlresult));
+                return false;
+        }
 
         if ((headers = curl_slist_append (headers, "Accept: application/vnd.vmware.vmw.rest-v1+json")) == (struct curl_slist *) 0) {
                 // An error occurred, all we can do is write out an error
                 // message and return
 
-                vmprod_writeerrmsg ("Unable to create header list (%s)\n", curl_easy_strerror (curlresult));
+                vmprod_writeerrmsg ("Unable to add Accept to header list (%s)\n", curl_easy_strerror (curlresult));
                 return false;
         }
 
@@ -746,7 +756,7 @@ bool vmprod_initialize (const char *vmserverurl, const char* credentials, const 
                         // so just ignore it and move to the next machine
 
                         if (verbose)
-                                printf ("Virtual machine is encrypted and we do not have password, skipping it...\n");
+                                printf ("Virtual machine is encrypted and we do not have password (or password is incorrect), skipping it...\n");
 
                         free (vmserver_response.data);
                         memset (&vmserver_response, 0, sizeof (HTTP_GET_DATA));
@@ -952,9 +962,10 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
         char                    *vmserverrestapiurl;
         const char              *vmpassword;
         long                    vmserver_responsecode;
+        HTTP_GET_DATA           vmserver_response;
         HTTP_POST_DATA          poweroncommand = {
-                .data = (unsigned char *) "on\n",
-                .length = 3,
+                .data = (unsigned char *) "on",
+                .length = 2,
                 .sent = 0
         };
 
@@ -1058,6 +1069,30 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
                                 return false;
                         }
 
+                        // Tell CURL how much data we will be uploading
+
+                        curlresult = curl_easy_setopt (vmrestserver, CURLOPT_INFILESIZE, poweroncommand.length);
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not specify
+                                // data we want to send to the API
+
+                                vmprod_writeerrmsg ("Unable to set how much data will be PUT (%s)\n", curl_easy_strerror (curlresult));
+                                (void) free (vmserverrestapiurl);
+                                return false;
+                        }
+                       
+                        // Set the structure we use to hold response data
+
+                        memset (&vmserver_response, 0, sizeof (vmserver_response));
+                        if (curlresult != CURLE_OK) {
+                                // An error occurred, and we could not specify
+                                // data we want to send to the API
+
+                                vmprod_writeerrmsg ("Unable to set data option, to hold response data (%s)\n", curl_easy_strerror (curlresult));
+                                (void) free (vmserverrestapiurl);
+                                return false;
+                        }
+
                         // We are now ready to make the request, to send a
                         // request to power the machine on (this will also move
                         // a machine from a suspended state to running)
@@ -1095,6 +1130,9 @@ bool vmprod_processwol (const char *vmserverurl, const char *ethernetstr, bool v
                         if (verbose)
                                 printf ("Virtual machine turned on!\n");
 
+                        // Free up the reponse data. We never used it, anyway...
+
+                        free (vmserver_response.data);
                         // We are done! Just return
 
                         return true;
